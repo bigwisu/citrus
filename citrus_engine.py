@@ -209,6 +209,51 @@ class CitrusEngine:
         cursor.executemany(sql, batch_data)
         self.db_connection.commit()
 
+    def compute_jaccard_matrix(self, clusters: Dict[str, str], top_k=50) -> pd.DataFrame:
+        """
+        Calculates Pairwise Jaccard Similarity between multiple queries.
+        Used to validate if search terms are truly distinct (Orthogonal).
+        """
+        cluster_ids = {}
+        
+        # 1. Retrieve Result Sets for all clusters
+        for label, query_text in clusters.items():
+            # Embed
+            vec = self.get_embedding(query_text)
+            
+            # Search DB (Get only IDs)
+            # Serialize for sqlite-vec
+            query_blob = struct.pack(f'{len(vec)}f', *vec)
+            
+            cursor = self.db_connection.cursor()
+            results = cursor.execute("""
+                SELECT rowid FROM papers 
+                WHERE vec_distance_cosine(embedding, ?) < 1.0
+                ORDER BY vec_distance_cosine(embedding, ?) ASC
+                LIMIT ?
+            """, [query_blob, query_blob, top_k]).fetchall()
+            
+            # Store Set of IDs
+            cluster_ids[label] = set([r[0] for r in results])
+
+        # 2. Build Matrix
+        labels = list(clusters.keys())
+        matrix = pd.DataFrame(index=labels, columns=labels, dtype=float)
+        
+        for row in labels:
+            for col in labels:
+                s1 = cluster_ids[row]
+                s2 = cluster_ids[col]
+                
+                intersection = len(s1.intersection(s2))
+                union = len(s1.union(s2))
+                
+                # Jaccard Formula
+                score = intersection / union if union > 0 else 0
+                matrix.loc[row, col] = score
+                
+        return matrix
+
     def search_similarity(self, query_vec: List[float], limit=500) -> pd.DataFrame:
         """
         Performs Cosine Similarity search.
