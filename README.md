@@ -8,7 +8,7 @@
 
 It introduces the **HiLAT (Human-in-the-Loop Adaptive Truncation)** protocol, allowing researchers to calibrate the "Semantic Cliff" of a literature search visually, rather than relying on arbitrary similarity thresholds.
 
-> **📄 Paper:** *From Static Keywords to Adaptive Vectors: The CITRUS Framework for LLM-Empowered Scientometric Retrieval* (Under Review, *Scientometrics*, 2026).
+> **Paper:** *From Static Keywords to Adaptive Vectors: The CITRUS Framework for LLM-Empowered Scientometric Retrieval* (Under Review, *Scientometrics*, 2026).
 
 ---
 

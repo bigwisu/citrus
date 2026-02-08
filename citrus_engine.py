@@ -148,6 +148,67 @@ class CitrusEngine:
         
         return df, is_large_corpus
 
+    def init_database(self, db_path="citrus.sqlite"):
+        """
+        Creates a fresh SQLite database with Vector Search capabilities.
+        Schema matches the CITRUS manuscript requirements.
+        """
+        if os.path.exists(db_path):
+            os.remove(db_path) # Clean slate for new analysis
+            
+        self.db_connection = sqlite3.connect(db_path)
+        self.db_connection.enable_load_extension(True)
+        
+        # Load sqlite-vec extension
+        # Note: In Colab, we usually don't need explicit path if installed via pip
+        try:
+            import sqlite_vec
+            self.db_connection.load_extension(sqlite_vec.loadable_path())
+        except Exception as e:
+            print(f"⚠️ Warning loading sqlite-vec: {e}")
+
+        self.db_connection.enable_load_extension(False)
+        
+        # Create Schema
+        # We use a 768-dim float vector (Standard for Granite & OpenAI MRL)
+        cursor = self.db_connection.cursor()
+        cursor.execute("""
+            CREATE TABLE papers (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                doi TEXT,
+                title TEXT,
+                year INTEGER,
+                abstract TEXT,
+                embedding VECTOR(768)
+            )
+        """)
+        self.db_connection.commit()
+        print(f"💽 Database initialized at: {db_path}")
+
+    def save_batch(self, texts: List[str], metadatas: List[Dict], vectors: List[List[float]]):
+        """
+        Inserts a batch of vectors + metadata into SQLite.
+        Handles the binary serialization required by sqlite-vec.
+        """
+        cursor = self.db_connection.cursor()
+        sql = "INSERT INTO papers (doi, title, year, abstract, embedding) VALUES (?, ?, ?, ?, ?)"
+        
+        batch_data = []
+        for meta, vec in zip(metadatas, vectors):
+            # Serialize vector to raw bytes (Little Endian Float32)
+            vec_blob = struct.pack(f'{len(vec)}f', *vec)
+            
+            batch_data.append((
+                meta.get('DOI', ''),
+                meta.get('Title', ''),
+                meta.get('Year', 0),
+                meta.get('Abstract', ''),
+                vec_blob
+            ))
+            
+        cursor.executemany(sql, batch_data)
+        self.db_connection.commit()
+
     def search_similarity(self, query_vec: List[float], limit=500) -> pd.DataFrame:
         """
         Performs Cosine Similarity search.
