@@ -102,6 +102,52 @@ class CitrusEngine:
         self.db_connection.enable_load_extension(False)
         print(f"🔌 Connected to Vector DB: {db_path}")
 
+    def process_scopus_files(self, file_paths: List[str]) -> Tuple[pd.DataFrame, bool]:
+        """
+        Reads Scopus CSVs, normalizes headers, and prepares text for embedding.
+        Returns: (Processed DataFrame, Is_Over_10k_Flag)
+        """
+        dfs = []
+        print(f"📂 Processing {len(file_paths)} file(s)...")
+        
+        for file in file_paths:
+            try:
+                # Scopus CSVs sometimes have mixed types, low_memory=False handles it
+                temp_df = pd.read_csv(file, on_bad_lines='skip', low_memory=False)
+                dfs.append(temp_df)
+            except Exception as e:
+                print(f"⚠️ Error reading {file}: {e}")
+
+        if not dfs:
+            raise ValueError("No valid CSV files loaded.")
+
+        # Combine all chunks
+        df = pd.concat(dfs, ignore_index=True)
+        
+        # 1. Standardize Columns (Scopus formatting)
+        # Ensure we have the basics even if columns are missing
+        required_cols = ['Title', 'Abstract', 'Year', 'DOI', 'Authors']
+        for col in required_cols:
+            if col not in df.columns:
+                df[col] = "" # Fill missing columns with empty strings
+
+        # 2. Data Cleaning (Crucial for Embedding)
+        # Fill NaNs with empty strings to prevent concatenation errors
+        df['Title'] = df['Title'].fillna("Untitled")
+        df['Abstract'] = df['Abstract'].fillna("No abstract available.")
+        
+        # 3. Create the Embedding Field (The Semantic Payload)
+        # Structure: "Title. Abstract"
+        df['text_to_embed'] = (
+            df['Title'].astype(str).str.strip() + ". " + 
+            df['Abstract'].astype(str).str.strip()
+        )
+
+        # 4. Check Volume
+        is_large_corpus = len(df) > 10000
+        
+        return df, is_large_corpus
+
     def search_similarity(self, query_vec: List[float], limit=500) -> pd.DataFrame:
         """
         Performs Cosine Similarity search.
