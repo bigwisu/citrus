@@ -1,0 +1,194 @@
+"""
+CITRUS ENGINE (v1.0)
+Core logic for: From Static Keywords to Adaptive Vectors
+Author: Wisudanto C. Suntoyo
+License: MIT
+
+This module handles:
+1. Dual-Mode Vectorization (IBM Granite & OpenAI MRL)
+2. Vector Database Operations (sqlite-vec)
+3. Mathematical Calibration (HiLAT Knee Detection)
+4. Jaccard Orthogonality Checks
+"""
+
+import os
+import sqlite3
+import struct
+import numpy as np
+import pandas as pd
+from kneed import KneeLocator
+from typing import List, Dict, Any, Tuple
+
+# --- OPTIONAL IMPORTS (Handled gracefully if keys aren't present) ---
+try:
+    from ibm_watsonx_ai.foundation_models import Embeddings
+    from ibm_watsonx_ai.metanames import EmbedTextParamsMetaNames as EmbedParams
+except ImportError:
+    pass # IBM library might not be installed in "Lite" mode
+
+try:
+    from openai import OpenAI
+except ImportError:
+    pass
+
+class CitrusEngine:
+    def __init__(self, provider="openai", api_key=None, project_id=None, ibm_url=None):
+        self.provider = provider.lower()
+        self.api_key = api_key
+        self.db_connection = None
+        
+        # IBM Granite Configuration (Matches Manuscript)
+        self.ibm_model_id = "ibm/slate-125m-english-rtrvr-v2"
+        self.ibm_project_id = project_id
+        self.ibm_url = ibm_url
+        
+        # OpenAI Configuration
+        self.openai_model = "text-embedding-3-small"
+        
+        print(f"🍊 CITRUS Engine Initialized via {self.provider.upper()}")
+
+    def get_embedding(self, text: str) -> List[float]:
+        """
+        Generates a 768-dimensional vector.
+        Crucial for Section 3.2.3: Enforces topological consistency.
+        """
+        if self.provider == "ibm":
+            return self._embed_ibm(text)
+        elif self.provider == "openai":
+            return self._embed_openai(text)
+        else:
+            raise ValueError("Provider must be 'ibm' or 'openai'")
+
+    def _embed_ibm(self, text: str) -> List[float]:
+        """Native IBM Watsonx implementation (High Rigor)."""
+        embed_params = {
+            EmbedParams.TRUNCATE_INPUT_TOKENS: 512,
+            EmbedParams.RETURN_OPTIONS: {'input_text': False}
+        }
+        embedding_model = Embeddings(
+            model_id=self.ibm_model_id,
+            params=embed_params,
+            credentials={"url": self.ibm_url, "apikey": self.api_key},
+            project_id=self.ibm_project_id
+        )
+        # Check if single string or list
+        if isinstance(text, str):
+            return embedding_model.embed_query(text)
+        return embedding_model.embed_documents(text)
+
+    def _embed_openai(self, text: str) -> List[float]:
+        """OpenAI implementation with Matryoshka (MRL) enforcement."""
+        client = OpenAI(api_key=self.api_key)
+        response = client.embeddings.create(
+            model=self.openai_model,
+            input=text,
+            dimensions=768 # <--- FORCED DIMENSIONALITY (The "Model Agnostic" Fix)
+        )
+        return response.data[0].embedding
+
+    # --- DATABASE OPERATIONS (sqlite-vec) ---
+    
+    def connect_db(self, db_path="embeddings_db.sqlite"):
+        """Connects to the vector database generated in Phase I."""
+        self.db_connection = sqlite3.connect(db_path)
+        self.db_connection.enable_load_extension(True)
+        # Assuming sqlite-vec is installed in the environment
+        try:
+            import sqlite_vec
+            sqlite_vec.load(self.db_connection)
+        except:
+            # Fallback for environments where extension loading is manual
+            pass 
+        self.db_connection.enable_load_extension(False)
+        print(f"🔌 Connected to Vector DB: {db_path}")
+
+    def search_similarity(self, query_vec: List[float], limit=500) -> pd.DataFrame:
+        """
+        Performs Cosine Similarity search.
+        Returns DataFrame with 'similarity' (1 - distance) and metadata.
+        """
+        # Serialize vector to raw bytes for sqlite-vec
+        query_blob = np.array(query_vec, dtype=np.float32).tobytes()
+        
+        cursor = self.db_connection.cursor()
+        
+        # Matches logic from Screenshot 6
+        sql = """
+            SELECT 
+                rowid,
+                title, 
+                year, 
+                abstract, 
+                vec_distance_cosine(embedding, ?) as distance
+            FROM papers 
+            ORDER BY distance ASC
+            LIMIT ?
+        """
+        
+        results = cursor.execute(sql, [query_blob, limit]).fetchall()
+        
+        # Format into DF
+        data = []
+        for r in results:
+            data.append({
+                "id": r[0],
+                "title": r[1],
+                "year": r[2],
+                "abstract": r[3],
+                "distance": r[4],
+                "similarity": 1 - r[4] # Convert dist to sim
+            })
+            
+        return pd.DataFrame(data)
+
+    # --- HiLAT MATH (Knee Detection) ---
+
+    def calculate_cliff(self, similarities: List[float]) -> Tuple[int, float]:
+        """
+        Identifies the mathematical 'Elbow' in the decay curve.
+        Returns: (rank_index, similarity_score)
+        """
+        x = range(len(similarities))
+        y = similarities
+        
+        # The logic from Manuscript Section 3.3.2
+        kneedle = KneeLocator(x, y, S=1.0, curve="convex", direction="decreasing")
+        
+        return kneedle.knee, kneedle.knee_y
+
+    def audit_drop_zone(self, df_results: pd.DataFrame, cutoff_rank: int, scope=5):
+        """
+        Returns the papers immediately rejected by the cutoff.
+        Used for the 'Confirm' button logic.
+        """
+        # Get rows from rank+1 to rank+scope
+        drop_zone = df_results.iloc[cutoff_rank : cutoff_rank+scope].copy()
+        return drop_zone[['title', 'similarity']]
+
+    # --- JACCARD ORTHOGONALITY ---
+    
+    def check_orthogonality(self, clusters: Dict[str, str]) -> pd.DataFrame:
+        """
+        Generates the Jaccard Heatmap data.
+        """
+        # 1. Retrieve IDs for all clusters
+        cluster_ids = {}
+        for label, query in clusters.items():
+            vec = self.get_embedding(query)
+            df = self.search_similarity(vec, limit=50) # Top 50 as per paper
+            cluster_ids[label] = set(df['id'].tolist())
+            
+        # 2. Calculate Matrix
+        labels = list(clusters.keys())
+        matrix = pd.DataFrame(index=labels, columns=labels, dtype=float)
+        
+        for row in labels:
+            for col in labels:
+                s1 = cluster_ids[row]
+                s2 = cluster_ids[col]
+                intersection = len(s1.intersection(s2))
+                union = len(s1.union(s2))
+                score = intersection / union if union > 0 else 0
+                matrix.loc[row, col] = score
+                
+        return matrix
