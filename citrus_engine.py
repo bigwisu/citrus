@@ -5,86 +5,103 @@ Author: Wisudanto C. Suntoyo
 License: MIT
 
 This module handles:
-1. Dual-Mode Vectorization (IBM Granite & OpenAI MRL)
+1. Dual-Mode Vectorization (IBM Granite & Gemini)
 2. Vector Database Operations (sqlite-vec)
 3. Mathematical Calibration (HiLAT Knee Detection)
 4. Jaccard Orthogonality Checks
 """
-
+# citrus_engine.py (Updated v1.1)
 import os
 import sqlite3
 import struct
+import time
 import numpy as np
 import pandas as pd
 from kneed import KneeLocator
 from typing import List, Dict, Any, Tuple
 
-# --- OPTIONAL IMPORTS (Handled gracefully if keys aren't present) ---
+# --- OPTIONAL IMPORTS ---
 try:
     from ibm_watsonx_ai.foundation_models import Embeddings
     from ibm_watsonx_ai.metanames import EmbedTextParamsMetaNames as EmbedParams
 except ImportError:
-    pass # IBM library might not be installed in "Lite" mode
+    pass
 
 try:
-    from openai import OpenAI
+    import google.generativeai as genai
 except ImportError:
     pass
 
 class CitrusEngine:
-    def __init__(self, provider="openai", api_key=None, project_id=None, ibm_url=None):
+    def __init__(self, provider="gemini", api_key=None, project_id=None, ibm_url=None):
         self.provider = provider.lower()
         self.api_key = api_key
         self.db_connection = None
         
-        # IBM Granite Configuration (Matches Manuscript)
+        # IBM Configuration
         self.ibm_model_id = "ibm/slate-125m-english-rtrvr-v2"
         self.ibm_project_id = project_id
         self.ibm_url = ibm_url
         
-        # OpenAI Configuration
-        self.openai_model = "text-embedding-3-small"
+        # Gemini Configuration
+        # text-embedding-004 is their best retrieval model
+        self.gemini_model = "models/text-embedding-004"
+        
+        if self.provider == "gemini":
+            genai.configure(api_key=self.api_key)
         
         print(f"🍊 CITRUS Engine Initialized via {self.provider.upper()}")
 
-    def get_embedding(self, text: str) -> List[float]:
+    def get_embedding(self, text_input: Any) -> List[List[float]]:
         """
-        Generates a 768-dimensional vector.
-        Crucial for Section 3.2.3: Enforces topological consistency.
+        Generates 768-dim vectors. Handles both Single String and List[String].
         """
-        if self.provider == "ibm":
-            return self._embed_ibm(text)
-        elif self.provider == "openai":
-            return self._embed_openai(text)
-        else:
-            raise ValueError("Provider must be 'ibm' or 'openai'")
+        # Normalize input to list
+        is_single = isinstance(text_input, str)
+        texts = [text_input] if is_single else text_input
 
-    def _embed_ibm(self, text: str) -> List[float]:
-        """Native IBM Watsonx implementation (High Rigor)."""
+        if self.provider == "ibm":
+            vectors = self._embed_ibm(texts)
+        elif self.provider == "gemini":
+            vectors = self._embed_gemini(texts)
+        else:
+            raise ValueError("Provider must be 'ibm' or 'gemini'")
+            
+        return vectors[0] if is_single else vectors
+
+    def _embed_ibm(self, texts: List[str]) -> List[List[float]]:
         embed_params = {
             EmbedParams.TRUNCATE_INPUT_TOKENS: 512,
             EmbedParams.RETURN_OPTIONS: {'input_text': False}
         }
-        embedding_model = Embeddings(
+        model = Embeddings(
             model_id=self.ibm_model_id,
             params=embed_params,
             credentials={"url": self.ibm_url, "apikey": self.api_key},
             project_id=self.ibm_project_id
         )
-        # Check if single string or list
-        if isinstance(text, str):
-            return embedding_model.embed_query(text)
-        return embedding_model.embed_documents(text)
+        return model.embed_documents(texts)
 
-    def _embed_openai(self, text: str) -> List[float]:
-        """OpenAI implementation with Matryoshka (MRL) enforcement."""
-        client = OpenAI(api_key=self.api_key)
-        response = client.embeddings.create(
-            model=self.openai_model,
-            input=text,
-            dimensions=768 # <--- FORCED DIMENSIONALITY (The "Model Agnostic" Fix)
-        )
-        return response.data[0].embedding
+    def _embed_gemini(self, texts: List[str]) -> List[List[float]]:
+        """
+        Gemini implementation with Retry Logic and MRL (768 dims).
+        """
+        # Gemini often fails with 500/503 errors on the free tier, so we retry.
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                result = genai.embed_content(
+                    model=self.gemini_model,
+                    content=texts,
+                    task_type="retrieval_document",
+                    output_dimensionality=768  # <--- FORCE TOPOLOGY MATCH
+                )
+                return result['embedding']
+            except Exception as e:
+                if attempt == max_retries - 1:
+                    raise e
+                print(f"⚠️ Gemini API Error (Attempt {attempt+1}/{max_retries}): {e}. Retrying...")
+                time.sleep(2 * (attempt + 1)) # Exponential backoff
 
     # --- DATABASE OPERATIONS (sqlite-vec) ---
     
