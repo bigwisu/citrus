@@ -33,7 +33,7 @@ except ImportError:
     pass
 
 class CitrusEngine:
-    def __init__(self, provider="gemini", api_key=None, project_id=None, ibm_url=None):
+    def __init__(self, provider="gemini", api_key=None, project_id=None, ibm_url=None, verbose=True):
         self.provider = provider.lower()
         self.api_key = api_key
         self.db_connection = None
@@ -43,65 +43,77 @@ class CitrusEngine:
         self.ibm_project_id = project_id
         self.ibm_url = ibm_url
         
-        # Gemini Configuration
-        # text-embedding-004 is their best retrieval model
-        self.gemini_model = "models/text-embedding-004"
+        # Gemini Configuration (Dynamic Discovery)
+        self.gemini_model = "models/text-embedding-004" # Default preference
         
-        if self.provider == "gemini":
+        if self.provider == "gemini" and self.api_key and self.api_key != "placeholder":
             genai.configure(api_key=self.api_key)
-        
-        print(f"🍊 CITRUS Engine Initialized via {self.provider.upper()}")
-
-    def get_embedding(self, text_input: Any) -> List[List[float]]:
-        """
-        Generates 768-dim vectors. Handles both Single String and List[String].
-        """
-        # Normalize input to list
-        is_single = isinstance(text_input, str)
-        texts = [text_input] if is_single else text_input
-
-        if self.provider == "ibm":
-            vectors = self._embed_ibm(texts)
-        elif self.provider == "gemini":
-            vectors = self._embed_gemini(texts)
-        else:
-            raise ValueError("Provider must be 'ibm' or 'gemini'")
             
-        return vectors[0] if is_single else vectors
+            # --- AUTO-DETECT AVAILABLE MODELS ---
+            try:
+                # List models that support embeddings
+                models = [m for m in genai.list_models() if 'embedContent' in m.supported_generation_methods]
+                model_names = [m.name for m in models]
+                
+                if verbose:
+                    print(f"🔎 Found Gemini Models: {model_names}")
 
-    def _embed_ibm(self, texts: List[str]) -> List[List[float]]:
-        embed_params = {
-            EmbedParams.TRUNCATE_INPUT_TOKENS: 512,
-            EmbedParams.RETURN_OPTIONS: {'input_text': False}
-        }
-        model = Embeddings(
-            model_id=self.ibm_model_id,
-            params=embed_params,
-            credentials={"url": self.ibm_url, "apikey": self.api_key},
-            project_id=self.ibm_project_id
-        )
-        return model.embed_documents(texts)
+                # Priority: 004 (Newest) -> 001 (Legacy/Stable)
+                if 'models/text-embedding-004' in model_names:
+                    self.gemini_model = 'models/text-embedding-004'
+                elif 'models/embedding-001' in model_names:
+                    self.gemini_model = 'models/embedding-001'
+                elif model_names:
+                    self.gemini_model = model_names[0] # Take whatever works
+                    
+            except Exception as e:
+                if verbose: print(f"⚠️ Warning: Could not list Gemini models ({e}). Using default.")
+
+        if verbose:
+            print(f"🍊 CITRUS Engine Initialized via {self.provider.upper()}")
+            if self.provider == "gemini":
+                print(f"   - Target Model: {self.gemini_model}")
 
     def _embed_gemini(self, texts: List[str]) -> List[List[float]]:
         """
         Gemini implementation with Retry Logic and MRL (768 dims).
         """
-        # Gemini often fails with 500/503 errors on the free tier, so we retry.
         max_retries = 3
+        # Clean inputs: remove empty strings which crash Gemini
+        clean_texts = [t if t.strip() else "Empty content" for t in texts]
+        
         for attempt in range(max_retries):
             try:
-                result = genai.embed_content(
-                    model=self.gemini_model,
-                    content=texts,
-                    task_type="retrieval_document",
-                    output_dimensionality=768  # <--- FORCE TOPOLOGY MATCH
-                )
+                # output_dimensionality is only supported on newer models (004)
+                # If we fell back to 001, we shouldn't pass this param or it might error
+                kwargs = {
+                    "model": self.gemini_model,
+                    "content": clean_texts,
+                    "task_type": "retrieval_document"
+                }
+                
+                # Only use MRL (768 force) if using the new model
+                if "004" in self.gemini_model:
+                    kwargs["output_dimensionality"] = 768
+
+                result = genai.embed_content(**kwargs)
+                
                 return result['embedding']
+                
             except Exception as e:
+                # Handle "404" specifically by trying fallback
+                if "404" in str(e) and "004" in self.gemini_model:
+                    print("⚠️ Model 004 not found. Falling back to embedding-001...")
+                    self.gemini_model = "models/embedding-001"
+                    continue # Retry immediately with new model
+                
                 if attempt == max_retries - 1:
+                    print(f"❌ Gemini Failure: {e}")
+                    # Return zero vectors to keep pipeline alive? Or raise.
+                    # Raising is safer for data integrity.
                     raise e
-                print(f"⚠️ Gemini API Error (Attempt {attempt+1}/{max_retries}): {e}. Retrying...")
-                time.sleep(2 * (attempt + 1)) # Exponential backoff
+                
+                time.sleep(2 * (attempt + 1))
 
     # --- DATABASE OPERATIONS (sqlite-vec) ---
     
