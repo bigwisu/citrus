@@ -143,7 +143,7 @@ class CitrusEngine:
         )
         return [d.embedding for d in response.data]
 
-    # --- DATABASE MANAGEMENT ---
+    # --- DATABASE MANAGEMENT (Updated Schema) ---
 
     def init_database(self, db_path="citrus.sqlite"):
         if os.path.exists(db_path):
@@ -166,6 +166,8 @@ class CitrusEngine:
                 title TEXT,
                 year INTEGER,
                 abstract TEXT,
+                authors TEXT,
+                source TEXT,
                 embedding VECTOR(768)
             )
         """)
@@ -174,17 +176,19 @@ class CitrusEngine:
 
     def save_batch(self, texts: List[str], metadatas: List[Dict], vectors: List[List[float]]):
         cursor = self.db_connection.cursor()
-        sql = "INSERT INTO papers (doi, title, year, abstract, embedding) VALUES (?, ?, ?, ?, ?)"
+        # ADDED: authors, source
+        sql = "INSERT INTO papers (doi, title, year, abstract, authors, source, embedding) VALUES (?, ?, ?, ?, ?, ?, ?)"
         
         batch_data = []
         for meta, vec in zip(metadatas, vectors):
-            # Serialize vector to raw bytes (Little Endian Float32)
             vec_blob = struct.pack(f'{len(vec)}f', *vec)
             batch_data.append((
                 meta.get('DOI', ''),
                 meta.get('Title', ''),
                 meta.get('Year', 0),
                 meta.get('Abstract', ''),
+                meta.get('Authors', ''), 
+                meta.get('Source title', ''), 
                 vec_blob
             ))
         cursor.executemany(sql, batch_data)
@@ -222,8 +226,9 @@ class CitrusEngine:
     def search_similarity(self, query_vec: List[float], limit=500) -> pd.DataFrame:
         query_blob = np.array(query_vec, dtype=np.float32).tobytes()
         cursor = self.db_connection.cursor()
+        # ADDED: authors, source retrieval
         sql = """
-            SELECT rowid, title, year, abstract, vec_distance_cosine(embedding, ?) as distance
+            SELECT rowid, title, year, abstract, authors, source, doi, vec_distance_cosine(embedding, ?) as distance
             FROM papers ORDER BY distance ASC LIMIT ?
         """
         results = cursor.execute(sql, [query_blob, limit]).fetchall()
@@ -232,7 +237,8 @@ class CitrusEngine:
         for r in results:
             data.append({
                 "id": r[0], "title": r[1], "year": r[2], "abstract": r[3],
-                "distance": r[4], "similarity": 1 - r[4]
+                "authors": r[4], "source": r[5], "doi": r[6],
+                "distance": r[7], "similarity": 1 - r[7]
             })
         return pd.DataFrame(data)
 
@@ -271,27 +277,49 @@ class CitrusEngine:
                 
         return matrix
     
-    def harvest_papers(self, cluster_cutoffs: Dict[str, int], active_clusters: Dict[str, str]) -> Tuple[pd.DataFrame, str]:
-        all_frames = []
+    def harvest_papers(self, cluster_cutoffs: Dict[str, int], active_clusters: Dict[str, str]) -> Tuple[pd.DataFrame, pd.DataFrame, str]:
+        """
+        Returns: (Included_DF, Excluded_DF, Audit_Log_String)
+        """
+        included_frames = []
+        excluded_frames = []
         report_lines = ["CITRUS METHODOLOGY AUDIT LOG", "="*30]
         
         for label, cutoff in cluster_cutoffs.items():
             if cutoff <= 0: continue
             
+            # Re-run search to get full metadata
             vec = self.get_embedding(active_clusters[label])
-            df = self.search_similarity(vec, limit=cutoff)
-            df['Cluster_Source'] = label
-            df['Rank_in_Cluster'] = df.index + 1
-            all_frames.append(df)
-            report_lines.append(f"Cluster '{label}': Retrieved Top {cutoff} papers.")
-
-        if not all_frames: return pd.DataFrame(), "\n".join(report_lines)
             
-        full_df = pd.concat(all_frames)
-        final_df = full_df.sort_values('similarity', ascending=False).drop_duplicates(subset=['title'])
+            # 1. Get INCLUDED (Rank 1 to n)
+            df_inc = self.search_similarity(vec, limit=cutoff)
+            df_inc['Cluster_Source'] = label
+            df_inc['Status'] = "INCLUDED"
+            df_inc['Rank'] = df_inc.index + 1
+            included_frames.append(df_inc)
+            
+            # 2. Get EXCLUDED (Rank n+1 to n+5) - The "Border Patrol"
+            # We search slightly deeper (cutoff + 5) and slice the tail
+            df_deep = self.search_similarity(vec, limit=cutoff + 5)
+            df_exc = df_deep.iloc[cutoff:].copy()
+            df_exc['Cluster_Source'] = label
+            df_exc['Status'] = "EXCLUDED (Border Audit)"
+            df_exc['Rank'] = df_exc.index + 1
+            excluded_frames.append(df_exc)
+            
+            report_lines.append(f"Cluster '{label}': Included Top {cutoff} | Audited Next {len(df_exc)}")
+
+        # Merge & Deduplicate Included
+        if not included_frames: return pd.DataFrame(), pd.DataFrame(), "No papers selected."
+            
+        final_inc = pd.concat(included_frames).sort_values('similarity', ascending=False).drop_duplicates(subset=['title'])
+        final_exc = pd.concat(excluded_frames) 
         
+        # Add DOI Links
+        final_inc['url'] = final_inc['doi'].apply(lambda x: f"https://doi.org/{x}" if x else "")
+        final_exc['url'] = final_exc['doi'].apply(lambda x: f"https://doi.org/{x}" if x else "")
+
         report_lines.append("="*30)
-        report_lines.append(f"Total Raw Candidates: {len(full_df)}")
-        report_lines.append(f"Unique Papers (Post-Dedup): {len(final_df)}")
+        report_lines.append(f"Total Unique Included: {len(final_inc)}")
         
-        return final_df, "\n".join(report_lines)
+        return final_inc, final_exc, "\n".join(report_lines)
