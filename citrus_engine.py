@@ -43,31 +43,30 @@ class CitrusEngine:
         self.ibm_project_id = project_id
         self.ibm_url = ibm_url
         
-        # Gemini Configuration (Dynamic Discovery)
-        self.gemini_model = "models/text-embedding-004" # Default preference
+        # Gemini Configuration
+        self.gemini_model = "models/gemini-embedding-001" # Default Fallback
         
         if self.provider == "gemini" and self.api_key and self.api_key != "placeholder":
+            import google.generativeai as genai
             genai.configure(api_key=self.api_key)
             
-            # --- AUTO-DETECT AVAILABLE MODELS ---
+            # --- AUTO-DETECT MODEL ---
             try:
-                # List models that support embeddings
-                models = [m for m in genai.list_models() if 'embedContent' in m.supported_generation_methods]
-                model_names = [m.name for m in models]
+                # Find all available embedding models
+                available = [m.name for m in genai.list_models() if 'embedContent' in m.supported_generation_methods]
                 
-                if verbose:
-                    print(f"🔎 Found Gemini Models: {model_names}")
+                if verbose: print(f"🔎 Available Gemini Models: {available}")
 
-                # Priority: 004 (Newest) -> 001 (Legacy/Stable)
-                if 'models/text-embedding-004' in model_names:
+                # Preference Logic: 004 (New) > 001 (Old)
+                if 'models/text-embedding-004' in available:
                     self.gemini_model = 'models/text-embedding-004'
-                elif 'models/embedding-001' in model_names:
+                elif 'models/gemini-embedding-001' in available:
+                    self.gemini_model = 'models/gemini-embedding-001'
+                elif 'models/embedding-001' in available:
                     self.gemini_model = 'models/embedding-001'
-                elif model_names:
-                    self.gemini_model = model_names[0] # Take whatever works
-                    
+                
             except Exception as e:
-                if verbose: print(f"⚠️ Warning: Could not list Gemini models ({e}). Using default.")
+                if verbose: print(f"⚠️ Warning: Could not list Gemini models. Defaulting to {self.gemini_model}")
 
         if verbose:
             print(f"🍊 CITRUS Engine Initialized via {self.provider.upper()}")
@@ -76,43 +75,39 @@ class CitrusEngine:
 
     def _embed_gemini(self, texts: List[str]) -> List[List[float]]:
         """
-        Gemini implementation with Retry Logic and MRL (768 dims).
+        Gemini implementation with Legacy Model Support.
         """
+        import google.generativeai as genai
+        import time
+        
         max_retries = 3
-        # Clean inputs: remove empty strings which crash Gemini
+        # Clean inputs: remove empty strings
         clean_texts = [t if t.strip() else "Empty content" for t in texts]
         
         for attempt in range(max_retries):
             try:
-                # output_dimensionality is only supported on newer models (004)
-                # If we fell back to 001, we shouldn't pass this param or it might error
+                # Base arguments
                 kwargs = {
                     "model": self.gemini_model,
                     "content": clean_texts,
                     "task_type": "retrieval_document"
                 }
                 
-                # Only use MRL (768 force) if using the new model
+                # CRITICAL FIX: Only send 'output_dimensionality' if using the NEW model.
+                # The old model (gemini-embedding-001) is natively 768, so we don't need this arg.
+                # Sending it to the old model causes 404/Invalid Argument errors.
                 if "004" in self.gemini_model:
                     kwargs["output_dimensionality"] = 768
 
                 result = genai.embed_content(**kwargs)
-                
                 return result['embedding']
                 
             except Exception as e:
-                # Handle "404" specifically by trying fallback
-                if "404" in str(e) and "004" in self.gemini_model:
-                    print("⚠️ Model 004 not found. Falling back to embedding-001...")
-                    self.gemini_model = "models/embedding-001"
-                    continue # Retry immediately with new model
-                
                 if attempt == max_retries - 1:
-                    print(f"❌ Gemini Failure: {e}")
-                    # Return zero vectors to keep pipeline alive? Or raise.
-                    # Raising is safer for data integrity.
+                    print(f"❌ Gemini Error on {self.gemini_model}: {e}")
                     raise e
                 
+                # Exponential backoff
                 time.sleep(2 * (attempt + 1))
 
     # --- DATABASE OPERATIONS (sqlite-vec) ---
