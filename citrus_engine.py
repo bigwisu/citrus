@@ -144,7 +144,7 @@ class CitrusEngine:
         )
 
         # 4. Check Volume
-        is_large_corpus = len(df) > 10000
+        is_large_corpus = len(df) > 15000
         
         return df, is_large_corpus
 
