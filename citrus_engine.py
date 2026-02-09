@@ -344,3 +344,46 @@ class CitrusEngine:
                 matrix.loc[row, col] = score
                 
         return matrix
+    
+    # --- FINAL HARVEST ---
+    
+    def harvest_papers(self, cluster_cutoffs: Dict[str, int]) -> Tuple[pd.DataFrame, str]:
+        """
+        Retrieves the final list of papers based on confirmed cut-offs.
+        Returns: (DataFrame of Papers, Audit Report Text)
+        """
+        all_frames = []
+        report_lines = ["CITRUS METHODOLOGY AUDIT LOG", "="*30]
+        
+        for label, cutoff in cluster_cutoffs.items():
+            if cutoff <= 0:
+                report_lines.append(f"Cluster '{label}': SKIPPED (n=0)")
+                continue
+                
+            # Retrieve Top N
+            # (Re-using search logic but getting full metadata)
+            # In production, cache the query vector to avoid re-embedding
+            vec = self.get_embedding(active_clusters[label]) # Assuming active_clusters is passed or stored
+            
+            df = self.search_similarity(vec, limit=cutoff)
+            df['Cluster_Source'] = label
+            df['Rank_in_Cluster'] = df.index + 1
+            all_frames.append(df)
+            
+            report_lines.append(f"Cluster '{label}': Retrieved Top {cutoff} papers.")
+
+        # Merge & Deduplicate
+        if not all_frames:
+            return pd.DataFrame(), "\n".join(report_lines)
+            
+        full_df = pd.concat(all_frames)
+        
+        # Deduplication Logic
+        # Keep the instance with the HIGHEST similarity (if a paper appears in multiple clusters)
+        final_df = full_df.sort_values('similarity', ascending=False).drop_duplicates(subset=['title'])
+        
+        report_lines.append("="*30)
+        report_lines.append(f"Total Raw Candidates: {len(full_df)}")
+        report_lines.append(f"Unique Papers (Post-Dedup): {len(final_df)}")
+        
+        return final_df, "\n".join(report_lines)
