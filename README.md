@@ -83,3 +83,20 @@ If you use CITRUS in your research, please cite the framework as:
 ## Performance Note
 *   **Large Corpora (>10k docs):** We strongly recommend using the **IBM Granite** mode. Standard Generative API endpoints (OpenAI/Gemini) may experience timeouts or rate-limiting when processing massive datasets in a single session.
 *   **Gemini Users:** Due to current API latency, Gemini is supported via Batch API only in the `scratchpad`, not the live dashboard.
+
+## Legal & Copyright Compliance (The "Content-Decoupled" Artifact)
+
+To comply with the [Scopus API Terms of Use](https://dev.elsevier.com/) regarding the mass redistribution of proprietary content, the `citrus_epistemic_artifact.sqlite` file in this repository is **Content-Decoupled**.
+
+*   ✅ **Included:** Vector Embeddings ($\mathbb{R}^{768}$), Cluster Assignments, CITRUS Scores, Bibliometric Metadata (DOI, Title, Year, Author).
+*   ❌ **Redacted:** The raw Abstract text.
+
+### How to Restore the Text ("Rehydration")
+Researchers with valid institutional access to Scopus can restore the full textual corpus using the provided script. This shifts the data retrieval from "Redistribution" to "Authorized API Consumption."
+
+1.  Ensure you have a valid Scopus API Key.
+2.  Run the script:
+    ```bash
+    python citrus_rehydrate.py
+    ```
+3.  The script will iterate through the DOIs in the database, fetch the abstracts using your credentials, and repopulate the SQLite file locally.
