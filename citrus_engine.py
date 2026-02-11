@@ -1,7 +1,7 @@
 """
 CITRUS ENGINE (v1.2)
 Core logic for: From Static Keywords to Adaptive Vectors
-Author: Wisudanto C. Suntoyo
+Author: Wisu Suntoyo
 License: MIT
 """
 
