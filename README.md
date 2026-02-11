@@ -97,6 +97,6 @@ Researchers with valid institutional access to Scopus can restore the full textu
 1.  Ensure you have a valid Scopus API Key.
 2.  Run the script:
     ```bash
-    python citrus_rehydrate.py
+    python rehydrate.py
     ```
 3.  The script will iterate through the DOIs in the database, fetch the abstracts using your credentials, and repopulate the SQLite file locally.
